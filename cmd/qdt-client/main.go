@@ -152,7 +152,7 @@ func run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	if mtu <= 0 {
 		mtu = cfg.MTU
 	}
-	tunnel := qdt.NewTunnel(connectResp.SessionID, mtu, send, recv)
+	tunnel := qdt.NewTunnelWithLimits(connectResp.SessionID, mtu, send, recv, cfg.MaxReassemblyBytes)
 
 	routes, err := configureClientInterface(tunDev.Name, connectResp, cfg, log)
 	if err != nil {
@@ -161,6 +161,9 @@ func run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	defer func() {
 		if err := netcfg.DeleteRoutes(tunDev.Name, routes); err != nil {
 			log.Warn("route cleanup failed", "err", err)
+		}
+		if err := netcfg.ResetDNS(tunDev.Name); err != nil {
+			log.Warn("dns cleanup failed", "err", err)
 		}
 	}()
 

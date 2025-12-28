@@ -32,6 +32,10 @@ type Tunnel struct {
 }
 
 func NewTunnel(sessionID uint64, mtu int, send, recv *CipherState) *Tunnel {
+	return NewTunnelWithLimits(sessionID, mtu, send, recv, 0)
+}
+
+func NewTunnelWithLimits(sessionID uint64, mtu int, send, recv *CipherState, maxReassembly int) *Tunnel {
 	if mtu <= 0 {
 		mtu = DefaultMTU
 	}
@@ -41,7 +45,7 @@ func NewTunnel(sessionID uint64, mtu int, send, recv *CipherState) *Tunnel {
 		Send:      send,
 		Recv:      recv,
 		Frag:      &Fragmenter{},
-		Reasm:     NewReassembler(0, 0),
+		Reasm:     NewReassembler(0, 0, maxReassembly),
 	}
 	t.recomputeMTU()
 	return t

@@ -91,6 +91,18 @@ func SetDNS(ifName string, dns []string) error {
 	return nil
 }
 
+func ResetDNS(ifName string) error {
+	path, err := exec.LookPath("resolvectl")
+	if err != nil {
+		return nil
+	}
+	cmd := exec.Command(path, "revert", ifName)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("resolvectl revert: %w", err)
+	}
+	return nil
+}
+
 func EnableIPForwarding() error {
 	return os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), 0644)
 }

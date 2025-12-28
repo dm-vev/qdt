@@ -8,3 +8,4 @@ log_level: "info"
 log_json: false
 insecure: true
 client_id: "laptop"
+max_reassembly_bytes: 65535

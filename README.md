@@ -29,9 +29,18 @@ gateway_ip: "10.8.0.1"
 dns: ["1.1.1.1", "8.8.8.8"]
 metrics_addr: ":9100"
 health_addr: ":9200"
+pprof_addr: ""
 log_level: "info"
 log_json: false
 session_timeout: 2m
+max_reassembly_bytes: 65535
+handshake_rate:
+  pps: 100
+  burst: 200
+handshake_ip_rate:
+  pps: 20
+  burst: 40
+  ttl: 1m
 rate_limit:
   pps: 10000
   burst: 20000
@@ -63,6 +72,7 @@ log_level: "info"
 log_json: false
 insecure: true
 client_id: "laptop"
+max_reassembly_bytes: 65535
 ```
 
 Run:
@@ -75,6 +85,12 @@ sudo ./qdt-client -config client.yaml
 
 - `http://<server>:9100/metrics`
 - `http://<server>:9100/healthz`
+
+## Profiling & load
+
+- Enable pprof with `pprof_addr: ":6060"` in `server.yaml`.
+- Capture profile: `go tool pprof http://<server>:6060/debug/pprof/profile?seconds=30`.
+- Load test (requires iperf3): run `iperf3 -s` on a host behind the tunnel and `iperf3 -c <host> -P 4` from the client.
 
 ## Docker
 

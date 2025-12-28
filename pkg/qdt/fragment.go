@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const fragHeaderLen = 12
+const (
+	fragHeaderLen        = 12
+	DefaultMaxReassembly = 65535
+)
 
 var (
 	ErrFragmentTooSmall = errors.New("fragment payload too small")
@@ -55,6 +58,7 @@ type Reassembler struct {
 	mu         sync.Mutex
 	ttl        time.Duration
 	maxEntries int
+	maxTotal   int
 	frags      map[uint32]*fragState
 	lastSweep  time.Time
 }
@@ -66,14 +70,17 @@ type fragState struct {
 	parts     map[uint32][]byte
 }
 
-func NewReassembler(ttl time.Duration, maxEntries int) *Reassembler {
+func NewReassembler(ttl time.Duration, maxEntries int, maxTotal int) *Reassembler {
 	if ttl <= 0 {
 		ttl = 5 * time.Second
 	}
 	if maxEntries <= 0 {
 		maxEntries = 1024
 	}
-	return &Reassembler{ttl: ttl, maxEntries: maxEntries, frags: make(map[uint32]*fragState)}
+	if maxTotal <= 0 {
+		maxTotal = DefaultMaxReassembly
+	}
+	return &Reassembler{ttl: ttl, maxEntries: maxEntries, maxTotal: maxTotal, frags: make(map[uint32]*fragState)}
 }
 
 func (r *Reassembler) Push(b []byte) ([]byte, error) {
@@ -83,6 +90,9 @@ func (r *Reassembler) Push(b []byte) ([]byte, error) {
 	}
 	if total == 0 {
 		return nil, fmt.Errorf("invalid fragment total")
+	}
+	if r.maxTotal > 0 && int(total) > r.maxTotal {
+		return nil, fmt.Errorf("fragment total too large")
 	}
 	if int(offset)+len(payload) > int(total) {
 		return nil, fmt.Errorf("fragment exceeds total")

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync/atomic"
 	"time"
 
@@ -37,6 +38,7 @@ type Server struct {
 	tunWriteCh chan []byte
 
 	sessions *sessionTable
+	hsLimit  *handshakeLimiter
 
 	ready atomic.Bool
 }
@@ -65,6 +67,7 @@ func NewServer(cfg Config, log *slog.Logger, metrics *Metrics) (*Server, error) 
 		packetPool: bufferpool.New(maxPacketSize),
 		tunWriteCh: make(chan []byte, 4096),
 		sessions:   newSessionTable(cfg.SessionShards),
+		hsLimit:    newHandshakeLimiter(cfg.HandshakeRate.PPS, cfg.HandshakeRate.Burst, cfg.HandshakeIPRate.PPS, cfg.HandshakeIPRate.Burst, cfg.HandshakeIPRate.TTL),
 	}
 	return s, nil
 }
@@ -110,6 +113,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 
 	metricsSrv, healthSrv := s.startMetricsServer()
+	pprofSrv := s.startPprofServer()
 
 	go s.tunWriteLoop(ctx)
 	go s.tunReadLoop(ctx)
@@ -128,6 +132,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		if healthSrv != nil {
 			_ = healthSrv.Close()
+		}
+		if pprofSrv != nil {
+			_ = pprofSrv.Close()
 		}
 		return ctx.Err()
 	case err := <-errCh:
@@ -188,6 +195,25 @@ func (s *Server) startMetricsServer() (*http.Server, *http.Server) {
 	return metricsSrv, healthSrv
 }
 
+func (s *Server) startPprofServer() *http.Server {
+	if s.cfg.PprofAddr == "" {
+		return nil
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{Addr: s.cfg.PprofAddr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.log.Error("pprof server error", "err", err)
+		}
+	}()
+	return srv
+}
+
 func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 	if s.ready.Load() {
 		w.WriteHeader(http.StatusOK)
@@ -198,12 +224,26 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
+	if !s.ready.Load() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	if r.Header.Get(qdt.TokenHeader) != s.cfg.Token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	clientAddr, _ := r.Context().Value(http3.RemoteAddrContextKey).(net.Addr)
+	if clientAddr != nil {
+		if !s.hsLimit.Allow(remoteIP(clientAddr.String())) {
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+	} else if !s.hsLimit.Allow(remoteIP(r.RemoteAddr)) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
 	streamer, ok := w.(http3.HTTPStreamer)
@@ -263,7 +303,7 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stream := streamer.HTTPStream()
-	tunnel := qdt.NewTunnel(sessionID, mtu, send, recv)
+	tunnel := qdt.NewTunnelWithLimits(sessionID, mtu, send, recv, s.cfg.MaxReassemblyBytes)
 
 	var limiter *rate.Limiter
 	if s.cfg.RateLimit.PPS > 0 && s.cfg.RateLimit.Burst > 0 {

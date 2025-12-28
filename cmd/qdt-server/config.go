@@ -11,24 +11,35 @@ import (
 )
 
 type Config struct {
-	Addr           string        `yaml:"addr"`
-	TLSCert        string        `yaml:"tls_cert"`
-	TLSKey         string        `yaml:"tls_key"`
-	Token          string        `yaml:"token"`
-	MTU            int           `yaml:"mtu"`
-	TunName        string        `yaml:"tun_name"`
-	PoolCIDR       string        `yaml:"pool_cidr"`
-	GatewayIP      string        `yaml:"gateway_ip"`
-	DNS            []string      `yaml:"dns"`
-	MetricsAddr    string        `yaml:"metrics_addr"`
-	HealthAddr     string        `yaml:"health_addr"`
-	LogLevel       string        `yaml:"log_level"`
-	LogJSON        bool          `yaml:"log_json"`
-	SessionTimeout time.Duration `yaml:"session_timeout"`
-	RateLimit      struct {
+	Addr               string        `yaml:"addr"`
+	TLSCert            string        `yaml:"tls_cert"`
+	TLSKey             string        `yaml:"tls_key"`
+	Token              string        `yaml:"token"`
+	MTU                int           `yaml:"mtu"`
+	TunName            string        `yaml:"tun_name"`
+	PoolCIDR           string        `yaml:"pool_cidr"`
+	GatewayIP          string        `yaml:"gateway_ip"`
+	DNS                []string      `yaml:"dns"`
+	MetricsAddr        string        `yaml:"metrics_addr"`
+	HealthAddr         string        `yaml:"health_addr"`
+	PprofAddr          string        `yaml:"pprof_addr"`
+	LogLevel           string        `yaml:"log_level"`
+	LogJSON            bool          `yaml:"log_json"`
+	SessionTimeout     time.Duration `yaml:"session_timeout"`
+	MaxReassemblyBytes int           `yaml:"max_reassembly_bytes"`
+	RateLimit          struct {
 		PPS   int `yaml:"pps"`
 		Burst int `yaml:"burst"`
 	} `yaml:"rate_limit"`
+	HandshakeRate struct {
+		PPS   int `yaml:"pps"`
+		Burst int `yaml:"burst"`
+	} `yaml:"handshake_rate"`
+	HandshakeIPRate struct {
+		PPS   int           `yaml:"pps"`
+		Burst int           `yaml:"burst"`
+		TTL   time.Duration `yaml:"ttl"`
+	} `yaml:"handshake_ip_rate"`
 	SendWorkers   int `yaml:"send_workers"`
 	SendQueue     int `yaml:"send_queue"`
 	SendBatch     int `yaml:"send_batch"`
@@ -73,14 +84,35 @@ func applyDefaults(cfg *Config) {
 	if cfg.HealthAddr == "" {
 		cfg.HealthAddr = ":9200"
 	}
+	if cfg.PprofAddr == "" {
+		cfg.PprofAddr = ""
+	}
 	if cfg.SessionTimeout == 0 {
 		cfg.SessionTimeout = 2 * time.Minute
+	}
+	if cfg.MaxReassemblyBytes == 0 {
+		cfg.MaxReassemblyBytes = qdt.DefaultMaxReassembly
 	}
 	if cfg.RateLimit.PPS == 0 {
 		cfg.RateLimit.PPS = 10000
 	}
 	if cfg.RateLimit.Burst == 0 {
 		cfg.RateLimit.Burst = 20000
+	}
+	if cfg.HandshakeRate.PPS == 0 {
+		cfg.HandshakeRate.PPS = 100
+	}
+	if cfg.HandshakeRate.Burst == 0 {
+		cfg.HandshakeRate.Burst = 200
+	}
+	if cfg.HandshakeIPRate.PPS == 0 {
+		cfg.HandshakeIPRate.PPS = 20
+	}
+	if cfg.HandshakeIPRate.Burst == 0 {
+		cfg.HandshakeIPRate.Burst = 40
+	}
+	if cfg.HandshakeIPRate.TTL == 0 {
+		cfg.HandshakeIPRate.TTL = 1 * time.Minute
 	}
 	if cfg.SendWorkers == 0 {
 		cfg.SendWorkers = runtime.NumCPU()

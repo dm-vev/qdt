@@ -10,7 +10,7 @@ func TestReassembly(t *testing.T) {
 	payload := bytes.Repeat([]byte("a"), 4000)
 	frag := &Fragmenter{}
 	id := frag.NextID()
-	reasm := NewReassembler(2*time.Second, 10)
+	reasm := NewReassembler(2*time.Second, 10, 0)
 
 	chunk := 1000
 	for offset := 0; offset < len(payload); offset += chunk {

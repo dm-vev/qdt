@@ -81,6 +81,14 @@ func SetDNS(ifName string, dns []string) error {
 	return nil
 }
 
+func ResetDNS(ifName string) error {
+	args := []string{"interface", "ip", "set", "dns", fmt.Sprintf("name=%s", ifName), "dhcp"}
+	if err := exec.Command("netsh", args...).Run(); err != nil {
+		return fmt.Errorf("netsh set dns dhcp: %w", err)
+	}
+	return nil
+}
+
 func EnableIPForwarding() error              { return nil }
 func SetupNAT(cidr, outIface string) error   { return nil }
 func CleanupNAT(cidr, outIface string) error { return nil }
