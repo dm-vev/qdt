@@ -17,6 +17,8 @@ go build ./cmd/qdt-client
 
 ## Server config (server.yaml)
 
+If `server.yaml` is missing, `qdt-server` creates it and generates a self-signed cert/key next to it.
+
 ```
 addr: ":443"
 tls_cert: "/etc/qdt/cert.pem"

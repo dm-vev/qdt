@@ -41,23 +41,41 @@ type Config struct {
 		Burst int           `yaml:"burst"`
 		TTL   time.Duration `yaml:"ttl"`
 	} `yaml:"handshake_ip_rate"`
-	SendWorkers   int `yaml:"send_workers"`
-	SendQueue     int `yaml:"send_queue"`
-	SendBatch     int `yaml:"send_batch"`
+	SendWorkers       int `yaml:"send_workers"`
+	SendQueue         int `yaml:"send_queue"`
+	SendBatch         int `yaml:"send_batch"`
 	SendDatagramQueue int `yaml:"send_datagram_queue"`
-	SessionShards int `yaml:"session_shards"`
-	NAT           struct {
+	SessionShards     int `yaml:"session_shards"`
+	NAT               struct {
 		Enabled       bool   `yaml:"enabled"`
 		ExternalIface string `yaml:"external_iface"`
 	} `yaml:"nat"`
 }
 
 func LoadConfig(path string) (Config, error) {
+	if path == "" {
+		return Config{}, fmt.Errorf("config path is empty")
+	}
 	cfg := Config{}
-	if err := config.Load(path, &cfg); err != nil {
+	exists, err := fileExists(path)
+	if err != nil {
 		return Config{}, err
 	}
+	if exists {
+		if err := config.Load(path, &cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	applyDefaults(&cfg)
+	updated, err := ensureServerAssets(path, &cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	if !exists || updated {
+		if err := writeConfig(path, cfg); err != nil {
+			return Config{}, err
+		}
+	}
 	if err := validateConfig(cfg); err != nil {
 		return Config{}, err
 	}
