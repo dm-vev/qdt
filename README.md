@@ -34,6 +34,7 @@ log_level: "info"
 log_json: false
 session_timeout: 2m
 max_reassembly_bytes: 65535
+max_sessions: 0
 handshake_rate:
   pps: 100
   burst: 200

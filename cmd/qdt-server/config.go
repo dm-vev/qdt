@@ -27,6 +27,7 @@ type Config struct {
 	LogJSON            bool          `yaml:"log_json"`
 	SessionTimeout     time.Duration `yaml:"session_timeout"`
 	MaxReassemblyBytes int           `yaml:"max_reassembly_bytes"`
+	MaxSessions        int           `yaml:"max_sessions"`
 	RateLimit          struct {
 		PPS   int `yaml:"pps"`
 		Burst int `yaml:"burst"`

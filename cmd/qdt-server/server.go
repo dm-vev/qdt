@@ -40,7 +40,8 @@ type Server struct {
 	sessions *sessionTable
 	hsLimit  *handshakeLimiter
 
-	ready atomic.Bool
+	ready          atomic.Bool
+	activeSessions atomic.Int64
 }
 
 func NewServer(cfg Config, log *slog.Logger, metrics *Metrics) (*Server, error) {
@@ -246,6 +247,10 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
+	if s.cfg.MaxSessions > 0 && s.activeSessions.Load() >= int64(s.cfg.MaxSessions) {
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		return
+	}
 	streamer, ok := w.(http3.HTTPStreamer)
 	if !ok {
 		http.Error(w, "not http3", http.StatusBadRequest)
@@ -339,6 +344,7 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addSession(sess *Session) {
 	s.sessions.Add(sess)
 	s.metrics.sessions.Inc()
+	s.activeSessions.Add(1)
 }
 
 func (s *Server) onSessionClose(sess *Session, err error) {
@@ -348,6 +354,7 @@ func (s *Server) onSessionClose(sess *Session, err error) {
 	s.sessions.Remove(sess)
 	s.pool.Release(sess.ip)
 	s.metrics.sessions.Dec()
+	s.activeSessions.Add(-1)
 }
 
 func (s *Server) tunReadLoop(ctx context.Context) {
