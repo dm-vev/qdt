@@ -6,10 +6,11 @@ import (
 )
 
 type Metrics struct {
-	sessions prometheus.Gauge
-	packets  *prometheus.CounterVec
-	bytes    *prometheus.CounterVec
-	drops    *prometheus.CounterVec
+	sessions   prometheus.Gauge
+	packets    *prometheus.CounterVec
+	bytes      *prometheus.CounterVec
+	drops      *prometheus.CounterVec
+	handshakes *prometheus.CounterVec
 }
 
 func NewMetrics() *Metrics {
@@ -30,5 +31,9 @@ func NewMetrics() *Metrics {
 			Name: "qdt_drops_total",
 			Help: "QDT drops",
 		}, []string{"reason"}),
+		handshakes: promauto.NewCounterVec(prometheus.CounterOpts{
+			Name: "qdt_handshakes_total",
+			Help: "QDT handshake results",
+		}, []string{"result"}),
 	}
 }

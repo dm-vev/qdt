@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -225,60 +227,65 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
+	reject := func(status int, reason, msg string) {
+		s.metrics.handshakes.WithLabelValues(reason).Inc()
+		http.Error(w, msg, status)
+	}
 	if !s.ready.Load() {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		reject(http.StatusServiceUnavailable, "not_ready", "not ready")
 		return
 	}
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		reject(http.StatusMethodNotAllowed, "method", "method not allowed")
 		return
 	}
-	if r.Header.Get(qdt.TokenHeader) != s.cfg.Token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if !tokenMatch(r.Header.Get(qdt.TokenHeader), s.cfg.Token) {
+		reject(http.StatusUnauthorized, "unauthorized", "unauthorized")
 		return
 	}
 	clientAddr, _ := r.Context().Value(http3.RemoteAddrContextKey).(net.Addr)
 	if clientAddr != nil {
 		if !s.hsLimit.Allow(remoteIP(clientAddr.String())) {
-			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			reject(http.StatusTooManyRequests, "rate_limited", "rate limited")
 			return
 		}
 	} else if !s.hsLimit.Allow(remoteIP(r.RemoteAddr)) {
-		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		reject(http.StatusTooManyRequests, "rate_limited", "rate limited")
 		return
 	}
 	if s.cfg.MaxSessions > 0 && s.activeSessions.Load() >= int64(s.cfg.MaxSessions) {
-		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		reject(http.StatusServiceUnavailable, "busy", "server busy")
 		return
 	}
 	streamer, ok := w.(http3.HTTPStreamer)
 	if !ok {
-		http.Error(w, "not http3", http.StatusBadRequest)
+		reject(http.StatusBadRequest, "not_http3", "not http3")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, qdt.MaxBodyBytes)
 	req, err := qdt.DecodeConnectRequest(r.Body)
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		reject(http.StatusBadRequest, "bad_request", "bad request")
 		return
 	}
 	clientNonce, err := qdt.DecodeNonce(req.ClientNonce)
 	if err != nil {
-		http.Error(w, "bad nonce", http.StatusBadRequest)
+		reject(http.StatusBadRequest, "bad_nonce", "bad nonce")
 		return
 	}
 	serverNonce, err := qdt.NewHandshakeNonce()
 	if err != nil {
-		http.Error(w, "nonce error", http.StatusInternalServerError)
+		reject(http.StatusInternalServerError, "nonce_error", "nonce error")
 		return
 	}
 	sessionID, err := qdt.NewSessionID()
 	if err != nil {
-		http.Error(w, "session id error", http.StatusInternalServerError)
+		reject(http.StatusInternalServerError, "session_id_error", "session id error")
 		return
 	}
 	clientIP, err := s.pool.Acquire()
 	if err != nil {
-		http.Error(w, "address pool exhausted", http.StatusServiceUnavailable)
+		reject(http.StatusServiceUnavailable, "pool_exhausted", "address pool exhausted")
 		return
 	}
 	releaseIP := true
@@ -289,7 +296,7 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 	ip4 := clientIP.To4()
 	if ip4 == nil {
-		http.Error(w, "invalid client ip", http.StatusInternalServerError)
+		reject(http.StatusInternalServerError, "bad_ip", "invalid client ip")
 		return
 	}
 	mtu := s.cfg.MTU
@@ -298,13 +305,13 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	keys, err := qdt.DeriveKeyMaterial(s.cfg.Token, clientNonce, serverNonce)
 	if err != nil {
-		http.Error(w, "key derivation error", http.StatusInternalServerError)
+		reject(http.StatusInternalServerError, "key_derivation_error", "key derivation error")
 		return
 	}
 	replay := qdt.NewReplayWindow(2048)
 	send, recv, err := qdt.NewServerCipherStates(keys, replay)
 	if err != nil {
-		http.Error(w, "cipher error", http.StatusInternalServerError)
+		reject(http.StatusInternalServerError, "cipher_error", "cipher error")
 		return
 	}
 	stream := streamer.HTTPStream()
@@ -338,7 +345,14 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := stream.Context()
 	sess.Start(ctx)
+	s.metrics.handshakes.WithLabelValues("ok").Inc()
 	<-sess.closed
+}
+
+func tokenMatch(got, want string) bool {
+	h1 := sha256.Sum256([]byte(got))
+	h2 := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(h1[:], h2[:]) == 1
 }
 
 func (s *Server) addSession(sess *Session) {

@@ -86,6 +86,7 @@ sudo ./qdt-client -config client.yaml
 
 - `http://<server>:9100/metrics`
 - `http://<server>:9100/healthz`
+- Handshake stats: `qdt_handshakes_total{result="ok|..."}`
 
 ## Profiling & load
 
