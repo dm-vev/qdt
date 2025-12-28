@@ -24,7 +24,8 @@ type Session struct {
 	stream      *http3.Stream
 	tunnel      *qdt.Tunnel
 	sendCh      chan []byte
-	sendMu      *sync.Mutex
+	dgCh        chan []byte
+	dgPool      *bufferpool.Pool
 	sendWorkers int
 	sendBatch   int
 	closeOnce   sync.Once
@@ -38,19 +39,18 @@ type Session struct {
 	tunWriteCh  chan<- []byte
 }
 
-func newSession(id uint64, ip net.IP, ip4 uint32, stream *http3.Stream, tunnel *qdt.Tunnel, pool *bufferpool.Pool, tunWriteCh chan<- []byte, limiter *rate.Limiter, sendWorkers int, sendQueue int, sendBatch int, metrics *Metrics, onClose func(*Session, error)) *Session {
+func newSession(id uint64, ip net.IP, ip4 uint32, stream *http3.Stream, tunnel *qdt.Tunnel, pool *bufferpool.Pool, dgPool *bufferpool.Pool, tunWriteCh chan<- []byte, limiter *rate.Limiter, sendWorkers int, sendQueue int, dgQueue int, sendBatch int, metrics *Metrics, onClose func(*Session, error)) *Session {
 	if sendWorkers <= 0 {
 		sendWorkers = 1
 	}
 	if sendQueue <= 0 {
 		sendQueue = 1024
 	}
+	if dgQueue <= 0 {
+		dgQueue = sendQueue
+	}
 	if sendBatch <= 0 {
 		sendBatch = 1
-	}
-	var sendMu *sync.Mutex
-	if sendWorkers > 1 {
-		sendMu = &sync.Mutex{}
 	}
 	s := &Session{
 		id:          id,
@@ -59,7 +59,8 @@ func newSession(id uint64, ip net.IP, ip4 uint32, stream *http3.Stream, tunnel *
 		stream:      stream,
 		tunnel:      tunnel,
 		sendCh:      make(chan []byte, sendQueue),
-		sendMu:      sendMu,
+		dgCh:        make(chan []byte, dgQueue),
+		dgPool:      dgPool,
 		sendWorkers: sendWorkers,
 		sendBatch:   sendBatch,
 		closed:      make(chan struct{}),
@@ -76,8 +77,9 @@ func newSession(id uint64, ip net.IP, ip4 uint32, stream *http3.Stream, tunnel *
 
 func (s *Session) Start(ctx context.Context) {
 	go s.recvLoop(ctx)
+	go s.sendLoop(ctx)
 	for i := 0; i < s.sendWorkers; i++ {
-		go s.sendLoop(ctx)
+		go s.encodeLoop(ctx)
 	}
 }
 
@@ -177,7 +179,7 @@ func (s *Session) recvLoop(ctx context.Context) {
 	}
 }
 
-func (s *Session) sendLoop(ctx context.Context) {
+func (s *Session) encodeLoop(ctx context.Context) {
 	enc := s.tunnel.NewEncoder()
 	for {
 		select {
@@ -187,14 +189,14 @@ func (s *Session) sendLoop(ctx context.Context) {
 		case <-s.closed:
 			return
 		case pkt := <-s.sendCh:
-			if err := s.processSend(enc, pkt); err != nil {
+			if err := s.processEncode(enc, pkt); err != nil {
 				return
 			}
 		batchLoop:
 			for i := 1; i < s.sendBatch; i++ {
 				select {
 				case next := <-s.sendCh:
-					if err := s.processSend(enc, next); err != nil {
+					if err := s.processEncode(enc, next); err != nil {
 						return
 					}
 				default:
@@ -205,13 +207,13 @@ func (s *Session) sendLoop(ctx context.Context) {
 	}
 }
 
-func (s *Session) processSend(enc *qdt.Encoder, pkt []byte) error {
+func (s *Session) processEncode(enc *qdt.Encoder, pkt []byte) error {
 	if s.outLimiter != nil && !s.outLimiter.Allow() {
 		s.metrics.drops.WithLabelValues("rate_out").Inc()
 		s.pool.Put(pkt)
 		return nil
 	}
-	if err := enc.EncodePacket(pkt, s.sendDatagram); err != nil {
+	if err := enc.EncodePacketTo(pkt, s.allocDatagram, s.enqueueDatagram); err != nil {
 		s.pool.Put(pkt)
 		s.Close(fmt.Errorf("send datagram: %w", err))
 		return err
@@ -223,11 +225,65 @@ func (s *Session) processSend(enc *qdt.Encoder, pkt []byte) error {
 	return nil
 }
 
-func (s *Session) sendDatagram(b []byte) error {
-	if s.sendMu == nil {
-		return s.stream.SendDatagram(b)
+func (s *Session) allocDatagram(size int) []byte {
+	buf := s.dgPool.Get()
+	if size > cap(buf) {
+		s.dgPool.Put(buf)
+		s.metrics.drops.WithLabelValues("datagram_oversize").Inc()
+		return nil
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	return s.stream.SendDatagram(b)
+	return buf[:size]
+}
+
+func (s *Session) enqueueDatagram(buf []byte) error {
+	select {
+	case s.dgCh <- buf:
+		return nil
+	case <-s.closed:
+		if buf != nil {
+			s.dgPool.Put(buf)
+		}
+		return fmt.Errorf("session closed")
+	}
+}
+
+func (s *Session) sendLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			s.Close(ctx.Err())
+			return
+		case <-s.closed:
+			return
+		case dg := <-s.dgCh:
+			if err := s.sendDatagram(dg); err != nil {
+				return
+			}
+		batchLoop:
+			for i := 1; i < s.sendBatch; i++ {
+				select {
+				case next := <-s.dgCh:
+					if err := s.sendDatagram(next); err != nil {
+						return
+					}
+				default:
+					break batchLoop
+				}
+			}
+		}
+	}
+}
+
+func (s *Session) sendDatagram(dg []byte) error {
+	if err := s.stream.SendDatagram(dg); err != nil {
+		if dg != nil {
+			s.dgPool.Put(dg)
+		}
+		s.Close(fmt.Errorf("send datagram: %w", err))
+		return err
+	}
+	if dg != nil {
+		s.dgPool.Put(dg)
+	}
+	return nil
 }

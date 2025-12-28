@@ -44,6 +44,7 @@ type Server struct {
 
 	ready          atomic.Bool
 	activeSessions atomic.Int64
+	dgPool         *bufferpool.Pool
 }
 
 func NewServer(cfg Config, log *slog.Logger, metrics *Metrics) (*Server, error) {
@@ -71,6 +72,7 @@ func NewServer(cfg Config, log *slog.Logger, metrics *Metrics) (*Server, error) 
 		tunWriteCh: make(chan []byte, 4096),
 		sessions:   newSessionTable(cfg.SessionShards),
 		hsLimit:    newHandshakeLimiter(cfg.HandshakeRate.PPS, cfg.HandshakeRate.Burst, cfg.HandshakeIPRate.PPS, cfg.HandshakeIPRate.Burst, cfg.HandshakeIPRate.TTL),
+		dgPool:     bufferpool.New(cfg.MTU),
 	}
 	return s, nil
 }
@@ -321,7 +323,7 @@ func (s *Server) connectHandler(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.RateLimit.PPS > 0 && s.cfg.RateLimit.Burst > 0 {
 		limiter = rate.NewLimiter(rate.Limit(s.cfg.RateLimit.PPS), s.cfg.RateLimit.Burst)
 	}
-	sess := newSession(sessionID, clientIP, binary.BigEndian.Uint32(ip4), stream, tunnel, s.packetPool, s.tunWriteCh, limiter, s.cfg.SendWorkers, s.cfg.SendQueue, s.cfg.SendBatch, s.metrics, s.onSessionClose)
+	sess := newSession(sessionID, clientIP, binary.BigEndian.Uint32(ip4), stream, tunnel, s.packetPool, s.dgPool, s.tunWriteCh, limiter, s.cfg.SendWorkers, s.cfg.SendQueue, s.cfg.SendDatagramQueue, s.cfg.SendBatch, s.metrics, s.onSessionClose)
 	s.addSession(sess)
 	releaseIP = false
 

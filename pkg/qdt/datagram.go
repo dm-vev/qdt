@@ -33,7 +33,7 @@ func ParseHeader(b []byte) (Header, []byte, error) {
 	if len(b) < HeaderLen {
 		return Header{}, nil, ErrInvalidDatagram
 	}
-	if string(b[:3]) != Magic {
+	if b[0] != 'Q' || b[1] != 'D' || b[2] != 'T' {
 		return Header{}, nil, ErrBadMagic
 	}
 	version := b[3]

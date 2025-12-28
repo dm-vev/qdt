@@ -44,6 +44,7 @@ type Config struct {
 	SendWorkers   int `yaml:"send_workers"`
 	SendQueue     int `yaml:"send_queue"`
 	SendBatch     int `yaml:"send_batch"`
+	SendDatagramQueue int `yaml:"send_datagram_queue"`
 	SessionShards int `yaml:"session_shards"`
 	NAT           struct {
 		Enabled       bool   `yaml:"enabled"`
@@ -123,6 +124,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.SendBatch == 0 {
 		cfg.SendBatch = 4
+	}
+	if cfg.SendDatagramQueue == 0 {
+		cfg.SendDatagramQueue = cfg.SendQueue
 	}
 	if cfg.SessionShards == 0 {
 		cfg.SessionShards = runtime.NumCPU() * 4

@@ -48,6 +48,7 @@ rate_limit:
 send_workers: 8
 send_queue: 4096
 send_batch: 4
+send_datagram_queue: 4096
 session_shards: 64
 nat:
   enabled: true

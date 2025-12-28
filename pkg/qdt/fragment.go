@@ -67,7 +67,13 @@ type fragState struct {
 	total     int
 	received  int
 	updatedAt time.Time
-	parts     map[uint32][]byte
+	buf       []byte
+	segments  []fragSegment
+}
+
+type fragSegment struct {
+	start int
+	end   int
 }
 
 func NewReassembler(ttl time.Duration, maxEntries int, maxTotal int) *Reassembler {
@@ -108,23 +114,44 @@ func (r *Reassembler) Push(b []byte) ([]byte, error) {
 		state = &fragState{
 			total:     int(total),
 			updatedAt: time.Now(),
-			parts:     make(map[uint32][]byte),
+			buf:       make([]byte, int(total)),
+			segments:  make([]fragSegment, 0, 8),
 		}
 		r.frags[id] = state
 	}
-	if _, exists := state.parts[offset]; exists {
-		return nil, nil
-	}
-	for off, part := range state.parts {
-		end := int(off) + len(part)
-		if int(offset) < end && int(offset)+len(payload) > int(off) {
+	off := int(offset)
+	end := off + len(payload)
+	segs := state.segments
+	if n := len(segs); n > 0 {
+		last := segs[n-1]
+		if off >= last.end {
+			copy(state.buf[off:end], payload)
+			state.segments = append(segs, fragSegment{start: off, end: end})
+			state.received += len(payload)
+			state.updatedAt = time.Now()
+			if state.received < state.total {
+				return nil, nil
+			}
+			assembled, err := assemble(state)
 			delete(r.frags, id)
-			return nil, ErrFragmentOverlap
+			return assembled, err
 		}
 	}
-	cp := make([]byte, len(payload))
-	copy(cp, payload)
-	state.parts[offset] = cp
+	idx := sort.Search(len(segs), func(i int) bool {
+		return segs[i].start >= off
+	})
+	if idx > 0 && segs[idx-1].end > off {
+		delete(r.frags, id)
+		return nil, ErrFragmentOverlap
+	}
+	if idx < len(segs) && segs[idx].start < end {
+		delete(r.frags, id)
+		return nil, ErrFragmentOverlap
+	}
+	copy(state.buf[off:end], payload)
+	state.segments = append(segs, fragSegment{})
+	copy(state.segments[idx+1:], segs[idx:])
+	state.segments[idx] = fragSegment{start: off, end: end}
 	state.received += len(payload)
 	state.updatedAt = time.Now()
 	if state.received < state.total {
@@ -152,23 +179,15 @@ func assemble(state *fragState) ([]byte, error) {
 	if state.received != state.total {
 		return nil, fmt.Errorf("incomplete reassembly")
 	}
-	offsets := make([]int, 0, len(state.parts))
-	for off := range state.parts {
-		offsets = append(offsets, int(off))
-	}
-	sort.Ints(offsets)
-	buf := make([]byte, state.total)
 	pos := 0
-	for _, off := range offsets {
-		part := state.parts[uint32(off)]
-		if off != pos {
+	for _, seg := range state.segments {
+		if seg.start != pos {
 			return nil, fmt.Errorf("fragment gap")
 		}
-		copy(buf[off:], part)
-		pos += len(part)
+		pos = seg.end
 	}
 	if pos != state.total {
 		return nil, fmt.Errorf("fragment size mismatch")
 	}
-	return buf, nil
+	return state.buf, nil
 }

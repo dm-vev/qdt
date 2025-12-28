@@ -197,6 +197,66 @@ func (e *Encoder) encodeAndEmit(msgType MessageType, payload []byte, emit func([
 	return emit(buf)
 }
 
+// EncodePacketTo writes encrypted datagrams into caller-provided buffers.
+func (e *Encoder) EncodePacketTo(payload []byte, alloc func(size int) []byte, emit func([]byte) error) error {
+	t := e.t
+	if t.Send == nil {
+		return errors.New("send cipher not set")
+	}
+	maxPayload := t.payloadMTUValue
+	if maxPayload <= 0 {
+		return fmt.Errorf("invalid mtu")
+	}
+	if len(payload) <= maxPayload {
+		return e.encodeAndEmitTo(MsgData, payload, alloc, emit)
+	}
+	fragMax := t.fragPayloadMTUValue
+	if fragMax <= 0 {
+		return fmt.Errorf("fragment mtu too small")
+	}
+	fragID := t.Frag.NextID()
+	offset := 0
+	for offset < len(payload) {
+		end := offset + fragMax
+		if end > len(payload) {
+			end = len(payload)
+		}
+		plainLen := fragHeaderLen + (end - offset)
+		plain := e.fragmentScratch(plainLen)
+		WriteFragmentHeader(plain[:fragHeaderLen], fragID, uint32(offset), uint32(len(payload)))
+		copy(plain[fragHeaderLen:], payload[offset:end])
+		if err := e.encodeAndEmitTo(MsgFragment, plain, alloc, emit); err != nil {
+			return err
+		}
+		offset = end
+	}
+	return nil
+}
+
+func (e *Encoder) encodeAndEmitTo(msgType MessageType, payload []byte, alloc func(size int) []byte, emit func([]byte) error) error {
+	t := e.t
+	counter := t.Send.NextCounter()
+	overhead := t.Send.Overhead()
+	bufSize := HeaderLen + overhead + len(payload)
+	buf := alloc(bufSize)
+	if cap(buf) < bufSize {
+		return ErrPayloadTooLarge
+	}
+	if len(buf) < bufSize {
+		buf = buf[:bufSize]
+	}
+	hdr := Header{
+		Version:   ProtocolVersion,
+		Type:      msgType,
+		Flags:     0,
+		SessionID: t.SessionID,
+		Counter:   counter,
+	}
+	WriteHeader(buf[:HeaderLen], hdr)
+	out := t.Send.Seal(buf[:HeaderLen], counter, buf[:HeaderLen], payload)
+	return emit(out)
+}
+
 func (e *Encoder) datagramScratch(size int) []byte {
 	if cap(e.scratch) < size {
 		e.scratch = make([]byte, size)
