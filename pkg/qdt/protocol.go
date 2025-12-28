@@ -1,8 +1,7 @@
 package qdt
 
 import (
-	"crypto/rand"
-	"encoding/binary"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,14 +10,16 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
-	Magic           = "QDT"
+	ProtocolVersion uint8 = 1
+	Magic                 = "QDT"
 
-	ConnectPath  = "/connect"
-	TokenHeader  = "X-QDT-Token"
+	ConnectPath = "/connect"
+	TokenHeader = "X-QDT-Token"
+
 	DefaultMTU   = 1350
-	HeaderLen    = 18
 	MaxBodyBytes = 4096
+
+	HeaderLen = 3 + 1 + 1 + 1 + 8 + 8
 )
 
 var (
@@ -31,79 +32,61 @@ type MessageType uint8
 
 const (
 	MsgData MessageType = iota
+	MsgFragment
 	MsgPing
 	MsgPong
 	MsgClose
 )
 
-type Datagram struct {
-	Version   uint8
-	Type      MessageType
-	Flags     uint8
-	SessionID uint64
-	Counter   uint32
-	Payload   []byte
-}
-
-func NewSessionID() (uint64, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return 0, fmt.Errorf("session id: %w", err)
-	}
-	return binary.BigEndian.Uint64(b[:]), nil
-}
-
-func NewDataDatagram(sessionID uint64, counter uint32, payload []byte) Datagram {
-	return Datagram{
-		Version:   ProtocolVersion,
-		Type:      MsgData,
-		SessionID: sessionID,
-		Counter:   counter,
-		Payload:   payload,
-	}
-}
-
-func AppendDatagram(dst []byte, d Datagram) ([]byte, error) {
-	if len(Magic) != 3 {
-		return nil, fmt.Errorf("magic length must be 3")
-	}
-	start := len(dst)
-	dst = append(dst, make([]byte, HeaderLen)...)
-	copy(dst[start:start+3], Magic)
-	dst[start+3] = d.Version
-	dst[start+4] = byte(d.Type)
-	dst[start+5] = d.Flags
-	binary.BigEndian.PutUint64(dst[start+6:start+14], d.SessionID)
-	binary.BigEndian.PutUint32(dst[start+14:start+18], d.Counter)
-	dst = append(dst, d.Payload...)
-	return dst, nil
-}
-
-func ParseDatagram(b []byte) (Datagram, error) {
-	if len(b) < HeaderLen {
-		return Datagram{}, ErrInvalidDatagram
-	}
-	if string(b[:3]) != Magic {
-		return Datagram{}, ErrBadMagic
-	}
-	if b[3] != ProtocolVersion {
-		return Datagram{}, ErrBadVersion
-	}
-	d := Datagram{
-		Version:   b[3],
-		Type:      MessageType(b[4]),
-		Flags:     b[5],
-		SessionID: binary.BigEndian.Uint64(b[6:14]),
-		Counter:   binary.BigEndian.Uint32(b[14:18]),
-		Payload:   b[HeaderLen:],
-	}
-	return d, nil
+type ConnectRequest struct {
+	Version     uint8    `json:"version"`
+	ClientNonce string   `json:"client_nonce"`
+	MTU         int      `json:"mtu"`
+	Caps        []string `json:"caps,omitempty"`
+	ClientID    string   `json:"client_id,omitempty"`
+	Platform    string   `json:"platform,omitempty"`
 }
 
 type ConnectResponse struct {
-	Version   uint8  `json:"version"`
-	SessionID uint64 `json:"session_id"`
-	MTU       int    `json:"mtu"`
+	Version     uint8    `json:"version"`
+	SessionID   uint64   `json:"session_id"`
+	ServerNonce string   `json:"server_nonce"`
+	MTU         int      `json:"mtu"`
+	ClientIP    string   `json:"client_ip"`
+	GatewayIP   string   `json:"gateway_ip"`
+	CIDR        string   `json:"cidr"`
+	DNS         []string `json:"dns,omitempty"`
+	Caps        []string `json:"caps,omitempty"`
+}
+
+func NewConnectRequest(clientNonce []byte, mtu int, caps []string, clientID, platform string) ConnectRequest {
+	if mtu <= 0 {
+		mtu = DefaultMTU
+	}
+	return ConnectRequest{
+		Version:     ProtocolVersion,
+		ClientNonce: EncodeNonce(clientNonce),
+		MTU:         mtu,
+		Caps:        caps,
+		ClientID:    clientID,
+		Platform:    platform,
+	}
+}
+
+func DecodeConnectRequest(r io.Reader) (ConnectRequest, error) {
+	var req ConnectRequest
+	limited := io.LimitReader(r, MaxBodyBytes)
+	dec := json.NewDecoder(limited)
+	if err := dec.Decode(&req); err != nil {
+		return ConnectRequest{}, fmt.Errorf("decode connect request: %w", err)
+	}
+	if req.Version != ProtocolVersion {
+		return ConnectRequest{}, fmt.Errorf("unsupported protocol version: %d", req.Version)
+	}
+	if req.MTU <= 0 {
+		req.MTU = DefaultMTU
+	}
+	return req, nil
 }
 
 func WriteConnectResponse(w http.ResponseWriter, resp ConnectResponse) error {
@@ -127,4 +110,12 @@ func ReadConnectResponse(r io.Reader) (ConnectResponse, error) {
 		resp.MTU = DefaultMTU
 	}
 	return resp, nil
+}
+
+func EncodeNonce(b []byte) string {
+	return base64.RawStdEncoding.EncodeToString(b)
+}
+
+func DecodeNonce(s string) ([]byte, error) {
+	return base64.RawStdEncoding.DecodeString(s)
 }

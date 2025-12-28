@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  qdt-server:
+    build: .
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./server.yaml:/etc/qdt/server.yaml:ro
+      - ./cert.pem:/etc/qdt/cert.pem:ro
+      - ./key.pem:/etc/qdt/key.pem:ro
+    command: ["-config", "/etc/qdt/server.yaml"]

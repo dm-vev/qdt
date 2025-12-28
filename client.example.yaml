@@ -1,0 +1,10 @@
+server: "135.181.7.44.sslip.io:443"
+token: "CHANGE_ME"
+mtu: 1350
+tun_name: "qdt0"
+route_mode: "default"
+dns: []
+log_level: "info"
+log_json: false
+insecure: true
+client_id: "laptop"

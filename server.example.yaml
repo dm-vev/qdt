@@ -1,0 +1,24 @@
+addr: ":443"
+tls_cert: "cert.pem"
+tls_key: "key.pem"
+token: "CHANGE_ME"
+mtu: 1350
+tun_name: "qdt0"
+pool_cidr: "10.8.0.0/24"
+gateway_ip: "10.8.0.1"
+dns: ["1.1.1.1", "8.8.8.8"]
+metrics_addr: ":9100"
+health_addr: ":9200"
+log_level: "info"
+log_json: false
+session_timeout: 2m
+rate_limit:
+  pps: 10000
+  burst: 20000
+send_workers: 8
+send_queue: 4096
+send_batch: 4
+session_shards: 64
+nat:
+  enabled: true
+  external_iface: "eth0"

@@ -3,21 +3,26 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"errors"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
+	"qdt/internal/logging"
+	"qdt/internal/netcfg"
 	"qdt/internal/tun"
 	"qdt/pkg/qdt"
 )
@@ -25,108 +30,205 @@ import (
 const maxPacketSize = 65535
 
 func main() {
-	var (
-		server   = flag.String("server", "", "server host:port")
-		token    = flag.String("token", "", "auth token")
-		tunName  = flag.String("tun", "qdt0", "TUN interface name")
-		insecure = flag.Bool("insecure", false, "skip TLS verification (dev only)")
-	)
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	var configPath string
+	flag.StringVar(&configPath, "config", "client.yaml", "path to config file")
 	flag.Parse()
 
-	if *server == "" || *token == "" {
-		log.Fatal("server and token are required")
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		slog.Error("config error", "err", err)
+		os.Exit(1)
 	}
 
-	host, _, err := net.SplitHostPort(*server)
+	logger, err := logging.New(cfg.LogLevel, cfg.LogJSON)
 	if err != nil {
-		log.Fatalf("invalid server address: %v", err)
+		slog.Error("logger error", "err", err)
+		os.Exit(1)
 	}
 
-	tunDev, err := tun.Open(*tunName)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx, cfg, logger); err != nil && err != context.Canceled {
+		logger.Error("client error", "err", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, cfg Config, log *slog.Logger) error {
+	tunDev, err := tun.Open(cfg.TunName)
 	if err != nil {
-		log.Fatalf("tun open: %v", err)
+		return fmt.Errorf("tun open: %w", err)
 	}
 	defer tunDev.Close()
-	log.Printf("TUN device: %s", tunDev.Name)
+
+	host, _, err := net.SplitHostPort(cfg.Server)
+	if err != nil {
+		return fmt.Errorf("invalid server address: %w", err)
+	}
 
 	tlsConf := &tls.Config{
-		InsecureSkipVerify: *insecure,
+		InsecureSkipVerify: cfg.Insecure,
 		NextProtos:         []string{http3.NextProtoH3},
 		ServerName:         host,
 	}
 
 	quicConf := &quic.Config{
 		EnableDatagrams: true,
-		KeepAlivePeriod: 15 * time.Second,
+		KeepAlivePeriod: 10 * time.Second,
+		MaxIdleTimeout:  30 * time.Second,
 	}
 
-	ctx := context.Background()
-	conn, err := quic.DialAddr(ctx, *server, tlsConf, quicConf)
+	dialCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
+	conn, err := quic.DialAddr(dialCtx, cfg.Server, tlsConf, quicConf)
 	if err != nil {
-		log.Fatalf("quic dial: %v", err)
+		return fmt.Errorf("quic dial: %w", err)
 	}
 	defer conn.CloseWithError(0, "")
 
 	tr := &http3.Transport{EnableDatagrams: true}
 	cc := tr.NewClientConn(conn)
-
-	reqStream, err := cc.OpenRequestStream(ctx)
+	stream, err := cc.OpenRequestStream(ctx)
 	if err != nil {
-		log.Fatalf("open request stream: %v", err)
+		return fmt.Errorf("open request stream: %w", err)
+	}
+
+	clientNonce, err := qdt.NewHandshakeNonce()
+	if err != nil {
+		return fmt.Errorf("nonce: %w", err)
+	}
+	caps := []string{"fragment", "aead"}
+	req := qdt.NewConnectRequest(clientNonce, cfg.MTU, caps, cfg.ClientID, runtime.GOOS)
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("encode connect request: %w", err)
 	}
 
 	reqURL := &url.URL{Scheme: "https", Host: host, Path: qdt.ConnectPath}
-	req := &http.Request{
-		Method: http.MethodPost,
-		URL:    reqURL,
-		Header: make(http.Header),
-	}
-	req.Header.Set(qdt.TokenHeader, *token)
+	hdr := make(http.Header)
+	hdr.Set(qdt.TokenHeader, cfg.Token)
+	hdr.Set("Content-Type", "application/json")
+	hdr.Set("Content-Length", strconv.Itoa(len(payload)))
 
-	if err := reqStream.SendRequestHeader(req); err != nil {
-		log.Fatalf("send request: %v", err)
+	hreq := &http.Request{Method: http.MethodPost, URL: reqURL, Header: hdr}
+	if err := stream.SendRequestHeader(hreq); err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	if _, err := stream.Write(payload); err != nil {
+		return fmt.Errorf("write request body: %w", err)
 	}
 
-	resp, err := reqStream.ReadResponse()
+	resp, err := stream.ReadResponse()
 	if err != nil {
-		log.Fatalf("read response: %v", err)
+		return fmt.Errorf("read response: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		log.Fatalf("connect failed: %s (%s)", resp.Status, string(body))
+		return fmt.Errorf("connect failed: %s (%s)", resp.Status, string(body))
 	}
 	connectResp, err := qdt.ReadConnectResponse(resp.Body)
 	if err != nil {
-		log.Fatalf("read connect response: %v", err)
+		return fmt.Errorf("read connect response: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
 
-	tunnel := qdt.NewTunnel(connectResp.SessionID, connectResp.MTU)
+	serverNonce, err := qdt.DecodeNonce(connectResp.ServerNonce)
+	if err != nil {
+		return fmt.Errorf("decode server nonce: %w", err)
+	}
+	keys, err := qdt.DeriveKeyMaterial(cfg.Token, clientNonce, serverNonce)
+	if err != nil {
+		return fmt.Errorf("key derivation: %w", err)
+	}
+	replay := qdt.NewReplayWindow(2048)
+	send, recv, err := qdt.NewClientCipherStates(keys, replay)
+	if err != nil {
+		return fmt.Errorf("cipher: %w", err)
+	}
+	mtu := connectResp.MTU
+	if mtu <= 0 {
+		mtu = cfg.MTU
+	}
+	tunnel := qdt.NewTunnel(connectResp.SessionID, mtu, send, recv)
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	routes, err := configureClientInterface(tunDev.Name, connectResp, cfg, log)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := netcfg.DeleteRoutes(tunDev.Name, routes); err != nil {
+			log.Warn("route cleanup failed", "err", err)
+		}
+	}()
 
-	loopCtx, cancel := context.WithCancel(context.Background())
+	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	errCh := make(chan error, 2)
-
 	go func() {
-		errCh <- tunnel.PumpTunToConn(loopCtx, tunDev, reqStream, maxPacketSize)
+		errCh <- tunnel.PumpTunToConn(loopCtx, tunDev, stream, maxPacketSize)
 	}()
-
 	go func() {
-		errCh <- tunnel.PumpConnToTun(loopCtx, tunDev, reqStream)
+		errCh <- tunnel.PumpConnToTunBuffered(loopCtx, tunDev, stream, maxPacketSize)
 	}()
 
 	select {
-	case <-stop:
-		cancel()
+	case <-ctx.Done():
+		return ctx.Err()
 	case err := <-errCh:
-		if !errors.Is(err, context.Canceled) {
-			log.Printf("session ended: %v", err)
-		}
+		return err
 	}
+}
+
+func configureClientInterface(ifName string, resp qdt.ConnectResponse, cfg Config, log *slog.Logger) ([]netcfg.Route, error) {
+	addr, err := clientAddress(resp.ClientIP, resp.CIDR)
+	if err != nil {
+		return nil, err
+	}
+	if err := netcfg.ConfigureInterface(netcfg.InterfaceConfig{
+		Name:    ifName,
+		Address: addr,
+		Gateway: resp.GatewayIP,
+		MTU:     resp.MTU,
+	}); err != nil {
+		return nil, fmt.Errorf("configure tun: %w", err)
+	}
+
+	routes := buildRoutes(cfg.RouteMode, resp)
+	if err := netcfg.AddRoutes(ifName, routes); err != nil {
+		return nil, fmt.Errorf("add routes: %w", err)
+	}
+
+	dns := cfg.DNS
+	if len(dns) == 0 {
+		dns = resp.DNS
+	}
+	if err := netcfg.SetDNS(ifName, dns); err != nil {
+		log.Warn("set dns failed", "err", err)
+	}
+
+	return routes, nil
+}
+
+func buildRoutes(mode string, resp qdt.ConnectResponse) []netcfg.Route {
+	switch mode {
+	case "none":
+		return nil
+	case "cidr":
+		return []netcfg.Route{{Dest: resp.CIDR, Gateway: resp.GatewayIP}}
+	default:
+		return []netcfg.Route{{Dest: "0.0.0.0/0", Gateway: resp.GatewayIP}}
+	}
+}
+
+func clientAddress(clientIP, cidr string) (string, error) {
+	_, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return "", fmt.Errorf("parse cidr: %w", err)
+	}
+	maskSize, _ := ipnet.Mask.Size()
+	return fmt.Sprintf("%s/%d", clientIP, maskSize), nil
 }
